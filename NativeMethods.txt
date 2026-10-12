@@ -16,3 +16,12 @@ DestroyMenu
 SetForegroundWindow
 GetCursorPos
 GetModuleHandle
+GetForegroundWindow
+GetWindowThreadProcessId
+GetKeyboardLayout
+MapVirtualKeyEx
+CallNextHookEx
+SetWindowsHookEx
+UnhookWindowsHookEx
+SendInput
+KBDLLHOOKSTRUCT

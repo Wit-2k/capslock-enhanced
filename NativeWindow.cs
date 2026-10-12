@@ -20,6 +20,8 @@ internal sealed unsafe class NativeWindow : IDisposable
     private const uint WmContextMenu = 0x007B;
     private const uint WmRightButtonUp = 0x0205;
     private const uint WmNull = 0;
+    // watchdog 与托盘回调使用不同的应用消息。
+    private const uint WmReload = 0x8002;
 
     private static NativeWindow? _activeWindow;
     // CsWin32 将 WNDPROC 生成为委托；静态字段保证回调不会被 GC 回收。
@@ -29,6 +31,8 @@ internal sealed unsafe class NativeWindow : IDisposable
     private HICON _icon;
     private bool _trayIconAdded;
     private bool _disposed;
+    // 保存退出原因，让消息循环向 watchdog 区分正常退出与 F5 重载。
+    private int _exitCode;
 
     public NativeWindow()
     {
@@ -39,6 +43,12 @@ internal sealed unsafe class NativeWindow : IDisposable
 
         RegisterClassAndCreateWindow();
         AddTrayIcon();
+    }
+
+    public bool RequestReload()
+    {
+        // 由 worker 消息循环线程处理销毁，避免从动作消费线程直接操作窗口。
+        return _handle.Value is not null && PInvoke.PostMessage(_handle, WmReload, default, default).Value != 0;
     }
 
     public int Run()
@@ -183,6 +193,13 @@ internal sealed unsafe class NativeWindow : IDisposable
             return;
         }
 
+        if (message == WmReload)
+        {
+            _exitCode = WorkerWatchdog.ReloadExitCode;
+            PInvoke.DestroyWindow(_handle);
+            return;
+        }
+
         if (message == WmClose)
         {
             PInvoke.DestroyWindow(_handle);
@@ -193,7 +210,7 @@ internal sealed unsafe class NativeWindow : IDisposable
         {
             RemoveTrayIcon();
             _handle = default;
-            PInvoke.PostQuitMessage(0);
+            PInvoke.PostQuitMessage(_exitCode);
         }
     }
 
@@ -217,7 +234,7 @@ internal sealed unsafe class NativeWindow : IDisposable
             if (_activeWindow is not null)
             {
                 _activeWindow.HandleWindowMessage(message, wParam, lParam);
-                if (message == TrayCallbackMessage || message == WmCommand || message == WmClose || message == WmDestroy)
+                if (message == TrayCallbackMessage || message == WmCommand || message == WmClose || message == WmReload || message == WmDestroy)
                     return default;
             }
         }

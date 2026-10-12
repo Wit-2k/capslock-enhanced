@@ -2,9 +2,11 @@ using System.Diagnostics;
 
 namespace Remake;
 
-/// <summary>监护 worker 的进程边界；clean exit 表示用户要求退出，不再拉起。</summary>
+/// <summary>监护 worker 进程；0 表示用户退出，F5 专用退出码表示无错误重载。</summary>
 internal static class WorkerWatchdog
 {
+    // 这是 worker 与 watchdog 共享的内部协议，不作为异常退出统计。
+    internal const int ReloadExitCode = 10;
     private static readonly TimeSpan RestartDelay = TimeSpan.FromSeconds(2);
 
     public static int Run()
@@ -25,6 +27,12 @@ internal static class WorkerWatchdog
                     return 0;
                 }
 
+                if (exitCode == ReloadExitCode)
+                {
+                    // F5 是显式重载，不计为崩溃，也不增加异常重启计数。
+                    AppLog.Info("worker 收到重载请求，watchdog 立即重启 worker。");
+                    continue;
+                }
                 AppLog.Warn($"worker 异常退出，exitCode={exitCode}。");
             }
             catch (Exception ex)
