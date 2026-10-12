@@ -8,6 +8,7 @@
     <PublishAot>true</PublishAot>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <CsWin32PlatformTarget>x64</CsWin32PlatformTarget>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
@@ -15,6 +16,8 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
+    <None Update="install-autostart.ps1" CopyToPublishDirectory="Always" />
+    <None Update="ensure-autostart.ps1" CopyToPublishDirectory="Always" />
   </ItemGroup>
 
 </Project>

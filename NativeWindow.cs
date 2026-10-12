@@ -22,6 +22,15 @@ internal sealed unsafe class NativeWindow : IDisposable
     private const uint WmNull = 0;
     // watchdog 与托盘回调使用不同的应用消息。
     private const uint WmReload = 0x8002;
+    private const uint WmPowerBroadcast = 0x0218;
+    private const uint WmWtsSessionChange = 0x02B1;
+    private const uint PowerResumeSuspend = 0x0007;
+    private const uint PowerResumeAutomatic = 0x0012;
+    private const uint PowerResumeCritical = 0x0006;
+    private const uint WtsConsoleConnect = 0x0001;
+    private const uint WtsRemoteConnect = 0x0003;
+    private const uint WtsSessionLogon = 0x0005;
+    private const uint WtsSessionUnlock = 0x0008;
 
     private static NativeWindow? _activeWindow;
     // CsWin32 将 WNDPROC 生成为委托；静态字段保证回调不会被 GC 回收。
@@ -33,6 +42,8 @@ internal sealed unsafe class NativeWindow : IDisposable
     private bool _disposed;
     // 保存退出原因，让消息循环向 watchdog 区分正常退出与 F5 重载。
     private int _exitCode;
+    private bool _sessionNotificationsRegistered;
+    private DateTime _lastHookRecoveryUtc;
 
     public NativeWindow()
     {
@@ -42,6 +53,7 @@ internal sealed unsafe class NativeWindow : IDisposable
             throw new Win32Exception(Marshal.GetLastWin32Error(), "GetModuleHandle 失败。");
 
         RegisterClassAndCreateWindow();
+        RegisterSessionNotifications();
         AddTrayIcon();
     }
 
@@ -177,43 +189,97 @@ internal sealed unsafe class NativeWindow : IDisposable
         }
     }
 
-    private void HandleWindowMessage(uint message, WPARAM wParam, LPARAM lParam)
+    private LRESULT? HandleWindowMessage(uint message, WPARAM wParam, LPARAM lParam)
     {
         if (message == TrayCallbackMessage)
         {
             uint notification = unchecked((uint)lParam.Value) & 0xFFFF;
             if (notification == WmRightButtonUp || notification == WmContextMenu)
                 ShowExitMenu();
-            return;
+            return (LRESULT)(nint)0;
         }
 
         if (message == WmCommand && unchecked((uint)wParam.Value) == ExitCommand)
         {
             PInvoke.DestroyWindow(_handle);
-            return;
+            return (LRESULT)(nint)0;
         }
 
         if (message == WmReload)
         {
             _exitCode = WorkerWatchdog.ReloadExitCode;
             PInvoke.DestroyWindow(_handle);
-            return;
+            return (LRESULT)(nint)0;
+        }
+
+        if (message == WmPowerBroadcast)
+        {
+            uint powerEvent = unchecked((uint)wParam.Value);
+            if (powerEvent is PowerResumeSuspend or PowerResumeAutomatic or PowerResumeCritical)
+                RequestHookRecovery("power-resume");
+            return (LRESULT)(nint)1;
+        }
+
+        if (message == WmWtsSessionChange)
+        {
+            uint sessionEvent = unchecked((uint)wParam.Value);
+            if (sessionEvent is WtsConsoleConnect or WtsRemoteConnect or WtsSessionLogon or WtsSessionUnlock)
+                RequestHookRecovery($"session-{sessionEvent}");
+            return (LRESULT)(nint)0;
         }
 
         if (message == WmClose)
         {
             PInvoke.DestroyWindow(_handle);
-            return;
+            return (LRESULT)(nint)0;
         }
 
         if (message == WmDestroy)
         {
+            UnregisterSessionNotifications();
             RemoveTrayIcon();
             _handle = default;
             PInvoke.PostQuitMessage(_exitCode);
+            return (LRESULT)(nint)0;
         }
+
+        return null;
     }
 
+    private void RequestHookRecovery(string reason)
+    {
+        DateTime now = DateTime.UtcNow;
+        if (now - _lastHookRecoveryUtc < TimeSpan.FromSeconds(1))
+            return;
+        _lastHookRecoveryUtc = now;
+        if (HookRecoveryRequested is null)
+        {
+            AppLog.Warn($"收到 {reason} 事件，但键盘 hook 恢复回调尚未连接。");
+            return;
+        }
+        HookRecoveryRequested(reason);
+    }
+
+    private void RegisterSessionNotifications()
+    {
+        if (PInvoke.WTSRegisterSessionNotification(_handle, 0).Value == 0)
+        {
+            AppLog.Warn($"WTSRegisterSessionNotification 失败，Win32Error={Marshal.GetLastWin32Error()}。");
+            return;
+        }
+        _sessionNotificationsRegistered = true;
+    }
+
+    private void UnregisterSessionNotifications()
+    {
+        if (!_sessionNotificationsRegistered)
+            return;
+        if (PInvoke.WTSUnRegisterSessionNotification(_handle).Value == 0)
+            AppLog.Warn($"WTSUnRegisterSessionNotification 失败，Win32Error={Marshal.GetLastWin32Error()}。");
+        _sessionNotificationsRegistered = false;
+    }
+
+    public Action<string>? HookRecoveryRequested { get; set; }
     private void RemoveTrayIcon()
     {
         if (_trayIconAdded)
@@ -231,12 +297,8 @@ internal sealed unsafe class NativeWindow : IDisposable
     {
         try
         {
-            if (_activeWindow is not null)
-            {
-                _activeWindow.HandleWindowMessage(message, wParam, lParam);
-                if (message == TrayCallbackMessage || message == WmCommand || message == WmClose || message == WmReload || message == WmDestroy)
-                    return default;
-            }
+            if (_activeWindow is not null && _activeWindow.HandleWindowMessage(message, wParam, lParam) is LRESULT result)
+                return result;
         }
         catch (Exception ex)
         {

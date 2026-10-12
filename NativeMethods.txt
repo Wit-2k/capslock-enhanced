@@ -26,3 +26,15 @@ SetWindowsHookEx
 UnhookWindowsHookEx
 SendInput
 KBDLLHOOKSTRUCT
+CreateJobObject
+SetInformationJobObject
+AssignProcessToJobObject
+MiniDumpWriteDump
+GetCurrentThreadId
+PostThreadMessage
+WTSRegisterSessionNotification
+WTSUnRegisterSessionNotification
+JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+PeekMessage
+GetCurrentProcess
+GetCurrentProcessId

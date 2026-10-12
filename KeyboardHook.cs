@@ -17,7 +17,9 @@ internal sealed unsafe class KeyboardHook : IDisposable
     private static KeyboardHook? _activeHook;
 
     private readonly InputDispatcher _dispatcher;
-    private readonly HHOOK _hook;
+    private HHOOK _hook;
+    private readonly Semaphore _workerCallbackAck;
+    private readonly EventWaitHandle _workerHookReady;
     private readonly HashSet<uint> _swallowedKeyUps = new(capacity: 64);
     private bool _capsDown;
     private bool _capsPassthrough;
@@ -39,23 +41,36 @@ internal sealed unsafe class KeyboardHook : IDisposable
     public KeyboardHook(InputDispatcher dispatcher)
     {
         _dispatcher = dispatcher;
+        _workerCallbackAck = Semaphore.OpenExisting(WorkerHookGuard.WorkerCallbackAckSemaphoreName);
+        try
+        {
+            _workerHookReady = EventWaitHandle.OpenExisting(WorkerHookGuard.WorkerHookReadyEventName);
+        }
+        catch
+        {
+            _workerCallbackAck.Dispose();
+            throw;
+        }
         _ = DefaultKeyBindings.CombinationBindingCount;
         if (_activeHook is not null)
-            throw new InvalidOperationException("当前进程已经安装键盘 hook。");
-
-        // 在 worker 的消息泵线程安装，避免低级 hook 因线程没有取消息而失效。
-        _activeHook = this;
-        _hook = PInvoke.SetWindowsHookEx(
-            WINDOWS_HOOK_ID.WH_KEYBOARD_LL,
-            Callback,
-            default(HINSTANCE),
-            0);
-        if (_hook.Value is null)
         {
-            _activeHook = null;
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "SetWindowsHookEx(WH_KEYBOARD_LL) 失败。");
+            _workerCallbackAck.Dispose();
+            _workerHookReady.Dispose();
+            throw new InvalidOperationException("当前进程已经安装键盘 hook。");
         }
 
+        _activeHook = this;
+        try
+        {
+            InstallHook();
+        }
+        catch
+        {
+            _activeHook = null;
+            _workerCallbackAck.Dispose();
+            _workerHookReady.Dispose();
+            throw;
+        }
         AppLog.Info($"WH_KEYBOARD_LL 已安装；默认绑定数={DefaultKeyBindings.TotalDefaultBindingCount}。");
     }
 
@@ -65,22 +80,93 @@ internal sealed unsafe class KeyboardHook : IDisposable
         if (code < HookAction || hook is null)
             return PInvoke.CallNextHookEx(default(HHOOK), code, wParam, lParam);
 
+        bool ackReleased = false;
         try
         {
             KBDLLHOOKSTRUCT key = *(KBDLLHOOKSTRUCT*)lParam.Value;
+            // 令牌在下一 hook 回调前发布；若动作吞键，则本回调在返回前回收令牌。
+            hook._workerCallbackAck.Release();
+            ackReleased = true;
             if ((key.flags & KBDLLHOOKSTRUCT_FLAGS.LLKHF_INJECTED) != 0 && InputSender.IsOurInjectedEvent(key.dwExtraInfo))
-                return PInvoke.CallNextHookEx(default(HHOOK), code, wParam, lParam);
+            {
+                LRESULT next = PInvoke.CallNextHookEx(default(HHOOK), code, wParam, lParam);
+                if (next.Value != 0)
+                    hook._workerCallbackAck.WaitOne(0);
+                return next;
+            }
 
             bool keyUp = (key.flags & KBDLLHOOKSTRUCT_FLAGS.LLKHF_UP) != 0;
-            return hook.HandleKey((VIRTUAL_KEY)key.vkCode, keyUp, code, wParam, lParam);
+            LRESULT result = hook.HandleKey((VIRTUAL_KEY)key.vkCode, keyUp, code, wParam, lParam);
+            if (result.Value != 0)
+                hook._workerCallbackAck.WaitOne(0);
+            return result;
         }
         catch (Exception ex)
         {
-            // 异常只排入日志队列，避免在系统 hook 回调中执行文件 I/O。
+            // 异常只排入日志队列；若无法发布 ACK，guard 会按 hook 缺席处理。
             hook._dispatcher.TryReportHookError(ex);
-            return PInvoke.CallNextHookEx(default(HHOOK), code, wParam, lParam);
+            if (!ackReleased)
+            {
+                try
+                {
+                    hook._workerCallbackAck.Release();
+                    ackReleased = true;
+                }
+                catch (SemaphoreFullException)
+                {
+                    // 满信号量意味着已有未消费 ACK，本次仍透传并让 guard 消费它。
+                }
+                catch (ObjectDisposedException)
+                {
+                    // hook 关闭竞争由 watchdog 的 guard 检出。
+                }
+            }
+            LRESULT next = PInvoke.CallNextHookEx(default(HHOOK), code, wParam, lParam);
+            if (next.Value != 0)
+                hook._workerCallbackAck.WaitOne(0);
+            return next;
         }
     }
+
+    private void InstallHook()
+    {
+        _hook = PInvoke.SetWindowsHookEx(
+            WINDOWS_HOOK_ID.WH_KEYBOARD_LL,
+            Callback,
+            default(HINSTANCE),
+            0);
+        if (_hook.Value is null)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "SetWindowsHookEx(WH_KEYBOARD_LL) 失败。");
+        _workerHookReady.Set();
+    }
+
+    public void Reinstall(string reason)
+    {
+        if (_disposed)
+            return;
+
+        if (_leftAltPassedThrough)
+            _dispatcher.TrySetLeftAltVisible(visible: false, physicalEventForwarded: false);
+        if (_hook.Value is not null && PInvoke.UnhookWindowsHookEx(_hook).Value == 0)
+            AppLog.Warn($"重新安装键盘 hook 时旧句柄卸载失败，Win32Error={Marshal.GetLastWin32Error()}。");
+        _hook = default;
+        ResetKeyState();
+        InstallHook();
+        AppLog.Info($"WH_KEYBOARD_LL 已重新安装；reason={reason}。");
+    }
+
+    private void ResetKeyState()
+    {
+        _swallowedKeyUps.Clear();
+        _capsDown = _capsPassthrough = _capsWasUsed = false;
+        _leftAltDown = _leftAltSwallowed = _leftAltPassedThrough = _leftAltUsedWithCaps = false;
+        _leftWinDown = _rightWinDown = false;
+        _leftControlDown = _rightControlDown = false;
+        _leftShiftDown = _rightShiftDown = false;
+        _rightAltDown = false;
+        _capsPressedAt = 0;
+    }
+
 
     private LRESULT HandleKey(VIRTUAL_KEY key, bool keyUp, int code, WPARAM wParam, LPARAM lParam)
     {
@@ -298,15 +384,20 @@ internal sealed unsafe class KeyboardHook : IDisposable
 
     private static LRESULT Swallow() => (LRESULT)(nint)1;
 
+
+
     public void Dispose()
     {
         if (_disposed)
             return;
         _disposed = true;
 
-        PInvoke.UnhookWindowsHookEx(_hook);
+        if (_hook.Value is not null)
+            PInvoke.UnhookWindowsHookEx(_hook);
+        _hook = default;
         if (ReferenceEquals(_activeHook, this))
             _activeHook = null;
-        AppLog.Info("WH_KEYBOARD_LL 键盘 hook 已卸载。");
+        _workerCallbackAck.Dispose();
+        _workerHookReady.Dispose();
     }
 }
