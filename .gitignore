@@ -8,3 +8,7 @@
 *.suo
 *.userosscache
 *.sln.docstates
+
+# 运行时生成的用户配置不应提交。
+CapsLock+settings.ini
+CapsLock+settingsDemo.ini

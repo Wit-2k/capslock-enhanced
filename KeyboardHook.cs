@@ -161,7 +161,10 @@ internal sealed unsafe class KeyboardHook : IDisposable
         bool isTap = !_capsWasUsed && Environment.TickCount64 - _capsPressedAt < CapsTapThresholdMilliseconds;
         _capsWasUsed = false;
         if (isTap)
-            _dispatcher.TryDispatch(DefaultKeyBindings.CapsTap.Action, VIRTUAL_KEY.VK_CAPITAL, HotkeyModifiers.None, 1, usesLeftAlt: false);
+        {
+            KeyBinding tap = DefaultKeyBindings.CapsTap;
+            _dispatcher.TryDispatch(tap.Action, VIRTUAL_KEY.VK_CAPITAL, HotkeyModifiers.None, tap.Repeat, usesLeftAlt: false, argument: tap.Argument);
+        }
         return Swallow();
     }
 
@@ -237,7 +240,7 @@ internal sealed unsafe class KeyboardHook : IDisposable
                         return QueueAction(KeyboardAction.NativeAltShortcut, key, modifiers, 1, usesLeftAlt: false, code, wParam, lParam);
                     return PInvoke.CallNextHookEx(default(HHOOK), code, wParam, lParam);
                 default:
-                    return QueueAction(binding.Action, key, modifiers, binding.Repeat, usesLeftAlt: (modifiers & HotkeyModifiers.LeftAlt) != 0, code, wParam, lParam);
+                    return QueueAction(binding.Action, key, modifiers, binding.Repeat, usesLeftAlt: (modifiers & HotkeyModifiers.LeftAlt) != 0, code, wParam, lParam, binding.Argument);
             }
         }
 
@@ -270,9 +273,10 @@ internal sealed unsafe class KeyboardHook : IDisposable
         bool usesLeftAlt,
         int code,
         WPARAM wParam,
-        LPARAM lParam)
+        LPARAM lParam,
+        string? argument = null)
     {
-        if (!_dispatcher.TryDispatch(action, key, modifiers, repeat, usesLeftAlt))
+        if (!_dispatcher.TryDispatch(action, key, modifiers, repeat, usesLeftAlt, argument))
             return PInvoke.CallNextHookEx(default(HHOOK), code, wParam, lParam);
 
         if (usesLeftAlt && _leftAltPassedThrough)

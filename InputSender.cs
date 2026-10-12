@@ -33,7 +33,54 @@ internal static unsafe class InputSender
 
         if (restoreLeftAlt)
             AppendKey(events, ref count, VIRTUAL_KEY.VK_MENU, keyUp: false, leftAltLayout, useScanCode: true);
-        if (count == 0)
+        SendInputBatch(events[..count], restoreLeftAlt);
+    }
+
+    public static void SendSequence(IReadOnlyList<SendSegment> segments, bool usesLeftAlt, bool leftAltVisible)
+    {
+        if (segments.Count == 0)
+            return;
+
+        var events = new List<INPUT>();
+        HKL keyboardLayout = default;
+        bool restoreLeftAlt = usesLeftAlt && leftAltVisible;
+        if (usesLeftAlt)
+        {
+            keyboardLayout = GetForegroundKeyboardLayout();
+            AppendKey(events, VIRTUAL_KEY.VK_MENU, keyUp: true, keyboardLayout, useScanCode: true);
+        }
+
+        foreach (SendSegment segment in segments)
+        {
+            if (segment.Text is not null)
+            {
+                AppendUnicodeText(events, segment.Text);
+                continue;
+            }
+
+            if (segment.IsKeyStateEvent)
+            {
+                bool useScanCode = IsModifierVirtualKey(segment.Key) || IsExtendedVirtualKey(segment.Key);
+                if (useScanCode && keyboardLayout.Value is null)
+                    keyboardLayout = GetForegroundKeyboardLayout();
+                AppendKey(events, segment.Key, segment.KeyUp, keyboardLayout, useScanCode);
+                continue;
+            }
+
+            if (segment.Modifiers != SendModifiers.None && keyboardLayout.Value is null)
+                keyboardLayout = GetForegroundKeyboardLayout();
+            for (int i = 0; i < segment.Repeat; i++)
+                AppendStroke(events, segment.Key, segment.Modifiers, segment.AlreadyDown, keyboardLayout);
+        }
+
+        if (restoreLeftAlt)
+            AppendKey(events, VIRTUAL_KEY.VK_MENU, keyUp: false, keyboardLayout, useScanCode: true);
+        SendInputBatch(CollectionsMarshal.AsSpan(events), restoreLeftAlt);
+    }
+
+    private static void SendInputBatch(ReadOnlySpan<INPUT> events, bool restoreLeftAlt)
+    {
+        if (events.Length == 0)
             return;
 
         uint inserted;
@@ -51,19 +98,19 @@ internal static unsafe class InputSender
                 PInvoke.PostMessage(foreground, WmCancelMode, default, default);
             // 给目标消息循环处理 WM_CANCELMODE 的机会，再发送导航键。
             Thread.Sleep(20);
-            inserted = released + PInvoke.SendInput(events[1..count], Marshal.SizeOf<INPUT>());
+            inserted = released + PInvoke.SendInput(events[1..], Marshal.SizeOf<INPUT>());
         }
         else
         {
-            inserted = PInvoke.SendInput(events[..count], Marshal.SizeOf<INPUT>());
+            inserted = PInvoke.SendInput(events, Marshal.SizeOf<INPUT>());
         }
 
-        if (inserted == count)
+        if (inserted == events.Length)
             return;
 
         int lastError = Marshal.GetLastWin32Error();
         RecoverAfterPartialSend(events, (int)inserted, restoreLeftAlt && inserted > 0);
-        throw new Win32Exception(lastError, $"SendInput 只插入 {inserted}/{count} 个事件。");
+        throw new Win32Exception(lastError, $"SendInput 只插入 {inserted}/{events.Length} 个事件。");
     }
     private static void AppendRepeated(Span<INPUT> events, ref int count, VIRTUAL_KEY key, byte repetitions, bool control = false, bool shift = false, HKL keyboardLayout = default)
     {
@@ -80,9 +127,10 @@ internal static unsafe class InputSender
         bool control = false,
         bool shift = false,
         bool alt = false,
-        HKL keyboardLayout = default)
+        HKL keyboardLayout = default,
+        bool windows = false)
     {
-        bool useScanCode = control || shift || alt;
+        bool useScanCode = control || shift || alt || windows;
         if (useScanCode && keyboardLayout.Value is null)
             keyboardLayout = GetForegroundKeyboardLayout();
 
@@ -92,10 +140,14 @@ internal static unsafe class InputSender
             AppendKey(events, ref count, VIRTUAL_KEY.VK_SHIFT, keyUp: false, keyboardLayout, useScanCode);
         if (alt)
             AppendKey(events, ref count, VIRTUAL_KEY.VK_MENU, keyUp: false, keyboardLayout, useScanCode);
+        if (windows)
+            AppendKey(events, ref count, VIRTUAL_KEY.VK_LWIN, keyUp: false, keyboardLayout, useScanCode);
 
         AppendKey(events, ref count, key, keyUp: false, keyboardLayout, useScanCode);
         AppendKey(events, ref count, key, keyUp: true, keyboardLayout, useScanCode);
 
+        if (windows)
+            AppendKey(events, ref count, VIRTUAL_KEY.VK_LWIN, keyUp: true, keyboardLayout, useScanCode);
         if (alt)
             AppendKey(events, ref count, VIRTUAL_KEY.VK_MENU, keyUp: true, keyboardLayout, useScanCode);
         if (shift)
@@ -103,11 +155,19 @@ internal static unsafe class InputSender
         if (control)
             AppendKey(events, ref count, VIRTUAL_KEY.VK_CONTROL, keyUp: true, keyboardLayout, useScanCode);
     }
+
     private static void AppendKey(Span<INPUT> events, ref int count, VIRTUAL_KEY key, bool keyUp, HKL keyboardLayout = default, bool useScanCode = false)
     {
         if ((uint)count >= (uint)events.Length)
             throw new InvalidOperationException("单个默认动作生成的输入事件超过缓冲区容量。");
+        events[count++] = new INPUT { type = INPUT_TYPE.INPUT_KEYBOARD, ki = CreateKeyboardInput(key, keyUp, keyboardLayout, useScanCode) };
+    }
 
+    private static void AppendKey(List<INPUT> events, VIRTUAL_KEY key, bool keyUp, HKL keyboardLayout = default, bool useScanCode = false) =>
+        events.Add(new INPUT { type = INPUT_TYPE.INPUT_KEYBOARD, ki = CreateKeyboardInput(key, keyUp, keyboardLayout, useScanCode) });
+
+    private static KEYBDINPUT CreateKeyboardInput(VIRTUAL_KEY key, bool keyUp, HKL keyboardLayout, bool useScanCode)
+    {
         ushort scanCode = 0;
         KEYBD_EVENT_FLAGS flags = keyUp ? KEYBD_EVENT_FLAGS.KEYEVENTF_KEYUP : 0;
         if (useScanCode)
@@ -126,17 +186,69 @@ internal static unsafe class InputSender
                 flags |= KEYBD_EVENT_FLAGS.KEYEVENTF_EXTENDEDKEY;
         }
 
-        INPUT input = default;
-        input.type = INPUT_TYPE.INPUT_KEYBOARD;
         // 扫描码模式必须清空 wVk，避免系统把该事件按虚拟键解释。
-        input.ki = new KEYBDINPUT
+        return new KEYBDINPUT
         {
             wVk = useScanCode ? default : key,
             wScan = scanCode,
             dwFlags = flags,
             dwExtraInfo = InjectionMarker,
         };
-        events[count++] = input;
+    }
+
+    private static void AppendStroke(
+        List<INPUT> events,
+        VIRTUAL_KEY key,
+        SendModifiers modifiers,
+        SendModifiers alreadyDown,
+        HKL keyboardLayout)
+    {
+        bool control = (modifiers & SendModifiers.Control) != 0;
+        bool shift = (modifiers & SendModifiers.Shift) != 0;
+        bool alt = (modifiers & SendModifiers.Alt) != 0;
+        bool windows = (modifiers & SendModifiers.Windows) != 0;
+        bool useScanCode = modifiers != SendModifiers.None || IsExtendedVirtualKey(key);
+        if (useScanCode && keyboardLayout.Value is null)
+            keyboardLayout = GetForegroundKeyboardLayout();
+
+        if (control && (alreadyDown & SendModifiers.Control) == 0)
+            AppendKey(events, VIRTUAL_KEY.VK_CONTROL, false, keyboardLayout, useScanCode: true);
+        if (shift && (alreadyDown & SendModifiers.Shift) == 0)
+            AppendKey(events, VIRTUAL_KEY.VK_SHIFT, false, keyboardLayout, useScanCode: true);
+        if (alt && (alreadyDown & SendModifiers.Alt) == 0)
+            AppendKey(events, VIRTUAL_KEY.VK_MENU, false, keyboardLayout, useScanCode: true);
+        if (windows && (alreadyDown & SendModifiers.Windows) == 0)
+            AppendKey(events, VIRTUAL_KEY.VK_LWIN, false, keyboardLayout, useScanCode: true);
+
+        AppendKey(events, key, false, keyboardLayout, useScanCode);
+        AppendKey(events, key, true, keyboardLayout, useScanCode);
+
+        if (windows && (alreadyDown & SendModifiers.Windows) == 0)
+            AppendKey(events, VIRTUAL_KEY.VK_LWIN, true, keyboardLayout, useScanCode: true);
+        if (alt && (alreadyDown & SendModifiers.Alt) == 0)
+            AppendKey(events, VIRTUAL_KEY.VK_MENU, true, keyboardLayout, useScanCode: true);
+        if (shift && (alreadyDown & SendModifiers.Shift) == 0)
+            AppendKey(events, VIRTUAL_KEY.VK_SHIFT, true, keyboardLayout, useScanCode: true);
+        if (control && (alreadyDown & SendModifiers.Control) == 0)
+            AppendKey(events, VIRTUAL_KEY.VK_CONTROL, true, keyboardLayout, useScanCode: true);
+    }
+
+    private static void AppendUnicodeText(List<INPUT> events, string text)
+    {
+        foreach (char character in text)
+        {
+            INPUT input = default;
+            input.type = INPUT_TYPE.INPUT_KEYBOARD;
+            input.ki = new KEYBDINPUT
+            {
+                wScan = character,
+                dwFlags = KEYBD_EVENT_FLAGS.KEYEVENTF_UNICODE,
+                dwExtraInfo = InjectionMarker,
+            };
+            events.Add(input);
+            input.ki.dwFlags |= KEYBD_EVENT_FLAGS.KEYEVENTF_KEYUP;
+            events.Add(input);
+        }
     }
     private static HKL GetForegroundKeyboardLayout()
     {
@@ -147,10 +259,35 @@ internal static unsafe class InputSender
         uint threadId = PInvoke.GetWindowThreadProcessId(foreground, out _);
         return threadId == 0 ? PInvoke.GetKeyboardLayout(0) : PInvoke.GetKeyboardLayout(threadId);
     }
+    internal static bool TryMapCharacterToKey(char character, out VIRTUAL_KEY key, out bool control, out bool shift, out bool alt)
+    {
+        short mapping = PInvoke.VkKeyScanEx(character, GetForegroundKeyboardLayout());
+        if (mapping == -1)
+        {
+            key = default;
+            control = shift = alt = false;
+            return false;
+        }
+
+        ushort value = unchecked((ushort)mapping);
+        key = (VIRTUAL_KEY)(value & 0xFF);
+        byte modifiers = (byte)(value >> 8);
+        control = (modifiers & 0x02) != 0;
+        shift = (modifiers & 0x01) != 0;
+        alt = (modifiers & 0x04) != 0;
+        return key != default;
+    }
+
+    private static bool IsModifierVirtualKey(VIRTUAL_KEY key) =>
+        key is VIRTUAL_KEY.VK_CONTROL or VIRTUAL_KEY.VK_LCONTROL or VIRTUAL_KEY.VK_RCONTROL or
+            VIRTUAL_KEY.VK_SHIFT or VIRTUAL_KEY.VK_LSHIFT or VIRTUAL_KEY.VK_RSHIFT or
+            VIRTUAL_KEY.VK_MENU or VIRTUAL_KEY.VK_LMENU or VIRTUAL_KEY.VK_RMENU or
+            VIRTUAL_KEY.VK_LWIN or VIRTUAL_KEY.VK_RWIN;
     private static bool IsExtendedVirtualKey(VIRTUAL_KEY key) =>
         key is VIRTUAL_KEY.VK_LEFT or VIRTUAL_KEY.VK_RIGHT or VIRTUAL_KEY.VK_UP or VIRTUAL_KEY.VK_DOWN
             or VIRTUAL_KEY.VK_HOME or VIRTUAL_KEY.VK_END or VIRTUAL_KEY.VK_PRIOR or VIRTUAL_KEY.VK_NEXT
-            or VIRTUAL_KEY.VK_INSERT or VIRTUAL_KEY.VK_DELETE;
+            or VIRTUAL_KEY.VK_INSERT or VIRTUAL_KEY.VK_DELETE or VIRTUAL_KEY.VK_RCONTROL or VIRTUAL_KEY.VK_RMENU
+            or VIRTUAL_KEY.VK_LWIN or VIRTUAL_KEY.VK_RWIN;
 
 
     private static void AppendAction(Span<INPUT> events, ref int count, KeyboardAction action, VIRTUAL_KEY key, byte repeat)

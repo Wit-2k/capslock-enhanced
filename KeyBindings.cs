@@ -1,3 +1,4 @@
+using System.Threading;
 using Windows.Win32.UI.Input.KeyboardAndMouse;
 
 namespace Remake;
@@ -52,30 +53,174 @@ internal enum KeyboardAction : byte
     SelectCurrentWord,
     SelectCurrentLine,
     NativeAltShortcut,
+    SendText,
+    RunTarget,
 }
 
 internal readonly record struct KeyChord(VIRTUAL_KEY Key, HotkeyModifiers Modifiers);
-internal readonly record struct KeyBinding(KeyboardAction Action, byte Repeat = 1);
+internal readonly record struct KeyBinding(KeyboardAction Action, byte Repeat = 1, string? Argument = null);
 
-/// <summary>只保存本次输入层需要的默认映射；INI 覆盖和完整 action registry 属于 M3。</summary>
+/// <summary>通过一次引用交换向低级 hook 发布不可变键位快照。</summary>
 internal static class DefaultKeyBindings
 {
-    private static readonly Dictionary<KeyChord, KeyBinding> Bindings = CreateBindings();
+    private sealed class BindingSnapshot(Dictionary<KeyChord, KeyBinding> bindings, KeyBinding capsTap)
+    {
+        public Dictionary<KeyChord, KeyBinding> Bindings { get; } = bindings;
+        public KeyBinding CapsTap { get; } = capsTap;
+    }
+
+    private static readonly Dictionary<KeyChord, KeyBinding> DefaultBindings = CreateBindings();
+    private static BindingSnapshot _active = new(DefaultBindings, new KeyBinding(KeyboardAction.ToggleCapsLock));
 
     public const int TotalDefaultBindingCount = 121;
-    public static int CombinationBindingCount => Bindings.Count;
+    public static int CombinationBindingCount => Volatile.Read(ref _active).Bindings.Count;
 
     static DefaultKeyBindings()
     {
-        // 121 条包括 press_caps；剪贴板的六个自定义槽位绑定不迁移。
-        if (Bindings.Count + 1 != TotalDefaultBindingCount)
-            throw new InvalidOperationException($"默认键位数错误：{Bindings.Count + 1}。");
+        // 保持原版默认键位总数；press_caps 单独计一条。
+        if (DefaultBindings.Count + 1 != TotalDefaultBindingCount)
+            throw new InvalidOperationException($"默认键位数错误：{DefaultBindings.Count + 1}。");
     }
 
-    public static KeyBinding CapsTap => new(KeyboardAction.ToggleCapsLock);
+    public static KeyBinding CapsTap => Volatile.Read(ref _active).CapsTap;
 
-    public static bool TryGet(VIRTUAL_KEY key, HotkeyModifiers modifiers, out KeyBinding binding) =>
-        Bindings.TryGetValue(new KeyChord(key, modifiers), out binding);
+    public static bool TryGet(VIRTUAL_KEY key, HotkeyModifiers modifiers, out KeyBinding binding)
+    {
+        BindingSnapshot current = Volatile.Read(ref _active);
+        return current.Bindings.TryGetValue(new KeyChord(key, modifiers), out binding);
+    }
+
+    public static void ReplaceOverrides(IReadOnlyDictionary<string, string> overrides)
+    {
+        var bindings = new Dictionary<KeyChord, KeyBinding>(DefaultBindings);
+        KeyBinding capsTap = new(KeyboardAction.ToggleCapsLock);
+        int applied = 0;
+
+        foreach ((string rawKey, string functionSpec) in overrides)
+        {
+            string settingKey = NormalizeSettingKey(rawKey);
+            if (!Actions.TryParseFunctionSpec(functionSpec, out KeyBinding binding, out string error))
+            {
+                AppLog.Warn($"忽略无效 [Keys] 函数：{settingKey}，{error}。");
+                continue;
+            }
+
+            if (settingKey == "press_caps")
+            {
+                capsTap = binding;
+                applied++;
+                continue;
+            }
+
+            if (!TryParseChordName(settingKey, out KeyChord chord))
+            {
+                AppLog.Warn($"忽略无法识别的 [Keys] 键位：{settingKey}。");
+                continue;
+            }
+
+            bindings[chord] = binding;
+            applied++;
+        }
+
+        Volatile.Write(ref _active, new BindingSnapshot(bindings, capsTap));
+        AppLog.Info($"[Keys] 配置快照已替换，生效覆盖数={applied}。");
+    }
+
+    internal static string NormalizeSettingKey(string value) => value.Trim().ToLowerInvariant();
+
+    private static bool TryParseChordName(string settingKey, out KeyChord chord)
+    {
+        HotkeyModifiers modifiers;
+        string keyName;
+        if (settingKey.StartsWith("caps_lalt_", StringComparison.Ordinal))
+        {
+            modifiers = HotkeyModifiers.LeftAlt;
+            keyName = settingKey[10..];
+        }
+        else if (settingKey.StartsWith("caps_win_", StringComparison.Ordinal))
+        {
+            modifiers = HotkeyModifiers.Windows;
+            keyName = settingKey[9..];
+        }
+        else if (settingKey.StartsWith("caps_", StringComparison.Ordinal))
+        {
+            modifiers = HotkeyModifiers.None;
+            keyName = settingKey[5..];
+        }
+        else
+        {
+            chord = default;
+            return false;
+        }
+
+        if (!TryParseKeyName(keyName, out VIRTUAL_KEY key))
+        {
+            chord = default;
+            return false;
+        }
+
+        chord = new KeyChord(key, modifiers);
+        return true;
+    }
+
+    internal static bool TryParseKeyName(string value, out VIRTUAL_KEY key)
+    {
+        if (value.Length == 1 && char.IsAsciiLetterOrDigit(value[0]))
+        {
+            key = (VIRTUAL_KEY)char.ToUpperInvariant(value[0]);
+            return true;
+        }
+
+        if (value.Length is 2 or 3 && value[0] == 'f' &&
+            byte.TryParse(value.AsSpan(1), out byte functionNumber) && functionNumber is >= 1 and <= 12)
+        {
+            key = (VIRTUAL_KEY)((int)VIRTUAL_KEY.VK_F1 + functionNumber - 1);
+            return true;
+        }
+
+        key = value switch
+        {
+            "backspace" or "bs" => VIRTUAL_KEY.VK_BACK,
+            "esc" or "escape" => VIRTUAL_KEY.VK_ESCAPE,
+            "space" => VIRTUAL_KEY.VK_SPACE,
+            "tab" => VIRTUAL_KEY.VK_TAB,
+            "enter" or "return" => VIRTUAL_KEY.VK_RETURN,
+            "left" => VIRTUAL_KEY.VK_LEFT,
+            "right" => VIRTUAL_KEY.VK_RIGHT,
+            "up" => VIRTUAL_KEY.VK_UP,
+            "down" => VIRTUAL_KEY.VK_DOWN,
+            "home" => VIRTUAL_KEY.VK_HOME,
+            "end" => VIRTUAL_KEY.VK_END,
+            "pageup" or "pgup" or "prior" => VIRTUAL_KEY.VK_PRIOR,
+            "pagedown" or "pgdn" or "next" => VIRTUAL_KEY.VK_NEXT,
+            "insert" or "ins" => VIRTUAL_KEY.VK_INSERT,
+            "delete" or "del" => VIRTUAL_KEY.VK_DELETE,
+            "ctrl" or "control" => VIRTUAL_KEY.VK_CONTROL,
+            "shift" => VIRTUAL_KEY.VK_SHIFT,
+            "alt" or "menu" => VIRTUAL_KEY.VK_MENU,
+            "lctrl" or "lcontrol" => VIRTUAL_KEY.VK_LCONTROL,
+            "rctrl" or "rcontrol" => VIRTUAL_KEY.VK_RCONTROL,
+            "lshift" => VIRTUAL_KEY.VK_LSHIFT,
+            "rshift" => VIRTUAL_KEY.VK_RSHIFT,
+            "lalt" => VIRTUAL_KEY.VK_LMENU,
+            "ralt" => VIRTUAL_KEY.VK_RMENU,
+            "lwin" => VIRTUAL_KEY.VK_LWIN,
+            "rwin" => VIRTUAL_KEY.VK_RWIN,
+            "backquote" => VIRTUAL_KEY.VK_OEM_3,
+            "minus" => VIRTUAL_KEY.VK_OEM_MINUS,
+            "equal" => VIRTUAL_KEY.VK_OEM_PLUS,
+            "leftsquarebracket" => VIRTUAL_KEY.VK_OEM_4,
+            "rightsquarebracket" => VIRTUAL_KEY.VK_OEM_6,
+            "backslash" => VIRTUAL_KEY.VK_OEM_5,
+            "semicolon" => VIRTUAL_KEY.VK_OEM_1,
+            "quote" => VIRTUAL_KEY.VK_OEM_7,
+            "comma" => VIRTUAL_KEY.VK_OEM_COMMA,
+            "dot" => VIRTUAL_KEY.VK_OEM_PERIOD,
+            "slash" => VIRTUAL_KEY.VK_OEM_2,
+            _ => default,
+        };
+        return key != default;
+    }
 
     private static Dictionary<KeyChord, KeyBinding> CreateBindings()
     {

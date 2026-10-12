@@ -21,7 +21,8 @@ internal readonly record struct InputWorkItem(
     bool UsesLeftAlt,
     bool LeftAltVisible,
     bool PhysicalEventForwarded,
-    Exception? Error);
+    Exception? Error,
+    string? Argument = null);
 
 /// <summary>钩子只向无界单读队列投递小型值；SendInput 和日志都在此后台线程执行。</summary>
 internal sealed class InputDispatcher : IDisposable
@@ -39,8 +40,8 @@ internal sealed class InputDispatcher : IDisposable
         _consumer = Task.Run(ConsumeAsync);
     }
 
-    public bool TryDispatch(KeyboardAction action, VIRTUAL_KEY key, HotkeyModifiers modifiers, byte repeat, bool usesLeftAlt) =>
-        _queue.Writer.TryWrite(new InputWorkItem(InputWorkKind.DispatchAction, action, key, repeat, modifiers, usesLeftAlt, false, false, null));
+    public bool TryDispatch(KeyboardAction action, VIRTUAL_KEY key, HotkeyModifiers modifiers, byte repeat, bool usesLeftAlt, string? argument = null) =>
+        _queue.Writer.TryWrite(new InputWorkItem(InputWorkKind.DispatchAction, action, key, repeat, modifiers, usesLeftAlt, false, false, null, argument));
 
     public bool TrySetLeftAltVisible(bool visible, bool physicalEventForwarded) =>
         _queue.Writer.TryWrite(new InputWorkItem(InputWorkKind.SetLeftAltVisible, default, default, 0, default, false, visible, physicalEventForwarded, null));
@@ -77,7 +78,7 @@ internal sealed class InputDispatcher : IDisposable
 
             if (item.Kind == InputWorkKind.LogPassThroughBinding)
             {
-                AppLog.Info($"M3/M4 动作尚未接入，透传键位：{item.Modifiers}+VK_{(ushort)item.Key:X2}。");
+                AppLog.Info($"remake 范围外默认键位透传：{item.Modifiers}+VK_{(ushort)item.Key:X2}。");
                 continue;
             }
 
@@ -96,15 +97,30 @@ internal sealed class InputDispatcher : IDisposable
                     AppLog.Warn("无法发送 worker reload 请求。");
                 continue;
             }
+
             try
             {
+                if (item.Action == KeyboardAction.SendText)
+                {
+                    Actions.SendCommand(item.Argument ?? string.Empty, item.UsesLeftAlt, _leftAltVisible);
+                    AppLog.Info("配置键位已发送指定内容。");
+                    continue;
+                }
+
+                if (item.Action == KeyboardAction.RunTarget)
+                {
+                    Actions.RunTarget(item.Argument ?? string.Empty);
+                    AppLog.Info("配置键位已启动指定目标。");
+                    continue;
+                }
+
                 InputSender.Send(item.Action, item.Key, item.Repeat, item.UsesLeftAlt, _leftAltVisible);
                 AppLog.Info($"输入派发：{item.Action}，repeat={item.Repeat}，leftAltModifier={item.UsesLeftAlt}，leftAltVisible={_leftAltVisible}。");
             }
             catch (Exception ex)
             {
-                // 单条合成输入失败只记录，不让 worker 停止接收后续热键。
-                AppLog.Error($"SendInput 动作失败：{item.Action}", ex);
+                // 单条动作失败只记录，不让 worker 停止接收后续热键。
+                AppLog.Error($"动作执行失败：{item.Action}", ex);
             }
         }
     }
