@@ -8,6 +8,7 @@ DispatchMessage
 PostQuitMessage
 PostMessage
 LoadImage
+DestroyIcon
 Shell_NotifyIcon
 CreatePopupMenu
 AppendMenu

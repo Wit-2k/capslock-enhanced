@@ -38,6 +38,7 @@ internal sealed unsafe class NativeWindow : IDisposable
     private readonly HINSTANCE _instance;
     private HWND _handle;
     private HICON _icon;
+    private bool _ownsIcon;
     private bool _trayIconAdded;
     private bool _disposed;
     // 保存退出原因，让消息循环向 watchdog 区分正常退出与 F5 重载。
@@ -114,27 +115,36 @@ internal sealed unsafe class NativeWindow : IDisposable
 
     private void AddTrayIcon()
     {
-        // 使用 Windows 共享应用图标，避免子仓库依赖父目录里的资源文件。
-        HANDLE loadedIcon = PInvoke.LoadImage(
-            default,
-            new PCWSTR((char*)32512),
-            GDI_IMAGE_TYPE.IMAGE_ICON,
-            0,
-            0,
-            IMAGE_FLAGS.LR_SHARED | IMAGE_FLAGS.LR_DEFAULTSIZE);
+        string iconPath = Path.Combine(AppContext.BaseDirectory, "capslock+icon.ico");
+        if (!File.Exists(iconPath))
+            throw new FileNotFoundException("发布目录缺少项目托盘图标。", iconPath);
+
+        HANDLE loadedIcon;
+        fixed (char* iconPathPointer = iconPath)
+        {
+            // 文件加载的 HICON 由当前 worker 所有；托盘销毁后必须显式释放。
+            loadedIcon = PInvoke.LoadImage(
+                default,
+                new PCWSTR(iconPathPointer),
+                GDI_IMAGE_TYPE.IMAGE_ICON,
+                0,
+                0,
+                IMAGE_FLAGS.LR_LOADFROMFILE | IMAGE_FLAGS.LR_DEFAULTSIZE);
+        }
         if (loadedIcon.Value is null)
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "加载系统托盘图标失败。");
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "加载项目托盘图标失败。");
 
         _icon = new HICON(loadedIcon.Value);
+        _ownsIcon = true;
         NOTIFYICONDATAW data = CreateNotifyIconData();
         if (PInvoke.Shell_NotifyIcon(NOTIFY_ICON_MESSAGE.NIM_ADD, in data).Value == 0)
         {
-            _icon = default;
+            ReleaseOwnedIcon();
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Shell_NotifyIcon(NIM_ADD) 失败。");
         }
 
         _trayIconAdded = true;
-        AppLog.Info("系统托盘图标已就绪。");
+        AppLog.Info("项目托盘图标已就绪。");
     }
 
 
@@ -224,7 +234,6 @@ internal sealed unsafe class NativeWindow : IDisposable
         {
             uint sessionEvent = unchecked((uint)wParam.Value);
             if (sessionEvent is WtsConsoleConnect or WtsRemoteConnect or WtsSessionLogon or WtsSessionUnlock)
-                RequestHookRecovery($"session-{sessionEvent}");
             return (LRESULT)(nint)0;
         }
 
@@ -278,6 +287,16 @@ internal sealed unsafe class NativeWindow : IDisposable
             AppLog.Warn($"WTSUnRegisterSessionNotification 失败，Win32Error={Marshal.GetLastWin32Error()}。");
         _sessionNotificationsRegistered = false;
     }
+    private void ReleaseOwnedIcon()
+    {
+        if (!_ownsIcon || _icon.Value is null)
+            return;
+
+        if (PInvoke.DestroyIcon(_icon).Value == 0)
+            AppLog.Warn($"DestroyIcon 失败，Win32Error={Marshal.GetLastWin32Error()}。");
+        _icon = default;
+        _ownsIcon = false;
+    }
 
     public Action<string>? HookRecoveryRequested { get; set; }
     private void RemoveTrayIcon()
@@ -290,7 +309,7 @@ internal sealed unsafe class NativeWindow : IDisposable
             AppLog.Info("系统托盘图标已移除。");
         }
 
-        _icon = default;
+        ReleaseOwnedIcon();
     }
 
     private static LRESULT WindowProcedure(HWND window, uint message, WPARAM wParam, LPARAM lParam)

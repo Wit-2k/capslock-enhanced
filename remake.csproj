@@ -9,6 +9,7 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <CsWin32PlatformTarget>x64</CsWin32PlatformTarget>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>capslock+icon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -18,6 +19,7 @@
     </PackageReference>
     <None Update="install-autostart.ps1" CopyToPublishDirectory="Always" />
     <None Update="ensure-autostart.ps1" CopyToPublishDirectory="Always" />
+    <None Update="capslock+icon.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />
   </ItemGroup>
 
 </Project>
