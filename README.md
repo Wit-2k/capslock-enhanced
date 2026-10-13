@@ -23,13 +23,13 @@ Not implemented:
 ## Requirements
 
 - Windows 10 or newer, x64
-- No AutoHotkey or .NET runtime is required to run the NativeAOT `remake.exe`.
+- No AutoHotkey or .NET runtime is required to run the NativeAOT `capslock-enhanced.exe`.
 
 ## Run
 
-Publish with `dotnet publish -c Release` from this directory, then run `remake.exe` from the publish output. Its manifest requests administrator rights; launching it directly can show UAC.
+Publish with `dotnet publish -c Release` from this directory, then run `capslock-enhanced.exe` from the publish output. Its manifest requests administrator rights; launching it directly can show UAC.
 
-The tray icon is embedded in `remake.exe`, so you can copy and rename the executable for manual use without `capslock+icon.ico`. The auto-start scripts are separate: keep them beside an executable named `remake.exe`, since they locate that exact filename.
+The tray icon is embedded in `capslock-enhanced.exe`, so you can copy and rename the executable for manual use without `capslock+icon.ico`. The auto-start scripts are separate: keep them beside an executable named `capslock-enhanced.exe`, since they locate that exact filename.
 
 Prebuilt binaries are attached to [Releases](https://github.com/Wit-2k/capslock-enhanced/releases).
 
@@ -93,7 +93,7 @@ Window binding, always-on-top, and transparency are outside the plan. `CapsLock+
 
 ## Configuration
 
-Runtime settings are stored in `CapsLock+settings.ini` next to `remake.exe`. It is generated automatically on first launch, reloaded while the program runs, and ignored by git.
+Runtime settings are stored in `CapsLock+settings.ini` next to `capslock-enhanced.exe`. It is generated automatically on first launch, reloaded while the program runs, and ignored by git.
 
 Override shortcuts in the `[Keys]` section:
 
@@ -107,6 +107,6 @@ Only functions whose names start with `keyFunc_` are accepted. Chord names use `
 
 ## Development Notes
 
-- This repository is the NativeAOT C# implementation; `remake.exe` is its only executable output. The legacy AutoHotkey files stay in the parent repository.
+- This repository is the NativeAOT C# implementation; `capslock-enhanced.exe` is its only executable output. The legacy AutoHotkey files stay in the parent repository.
 - Default bindings live in `KeyBindings.cs` and are checked at startup against a fixed count of 121 entries: 120 CapsLock combinations plus the CapsLock tap.
 - Clipboard and all window-management features remain out of scope.

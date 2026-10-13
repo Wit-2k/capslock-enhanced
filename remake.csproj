@@ -10,8 +10,8 @@
     <CsWin32PlatformTarget>x64</CsWin32PlatformTarget>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>capslock+icon.ico</ApplicationIcon>
-    <!-- 版本与产品名写入文件属性；AssemblyVersion 等未单独指定时跟随 Version。
-         FileDescription 取自 AssemblyTitle，ProductName 取自 Product。 -->
+    <!-- 输出文件名取自 AssemblyName；版本与产品名写入文件属性。 -->
+    <AssemblyName>capslock-enhanced</AssemblyName>
     <Version>1.1.0</Version>
     <Product>capslock-enhanced</Product>
     <AssemblyTitle>capslock-enhanced</AssemblyTitle>

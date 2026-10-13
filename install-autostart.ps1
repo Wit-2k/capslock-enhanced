@@ -29,10 +29,10 @@ if ($Uninstall) {
     return
 }
 
-$executablePath = Join-Path $PSScriptRoot 'remake.exe'
+$executablePath = Join-Path $PSScriptRoot 'capslock-enhanced.exe'
 $recoveryScriptPath = Join-Path $PSScriptRoot 'ensure-autostart.ps1'
 if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf)) {
-    throw "找不到与安装脚本同目录的 remake.exe：$executablePath"
+    throw "找不到与安装脚本同目录的 capslock-enhanced.exe：$executablePath"
 }
 if (-not (Test-Path -LiteralPath $recoveryScriptPath -PathType Leaf)) {
     throw "找不到周期恢复脚本：$recoveryScriptPath"

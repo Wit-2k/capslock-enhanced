@@ -1,6 +1,6 @@
 ﻿[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
 param(
-    [string]$ExecutablePath = (Join-Path $PSScriptRoot 'remake.exe')
+    [string]$ExecutablePath = (Join-Path $PSScriptRoot 'capslock-enhanced.exe')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,7 +10,7 @@ if (Test-Path -LiteralPath $disabledMarker -PathType Leaf) {
 }
 
 if (-not (Test-Path -LiteralPath $ExecutablePath -PathType Leaf)) {
-    throw "找不到 remake.exe：$ExecutablePath"
+    throw "找不到 capslock-enhanced.exe：$ExecutablePath"
 }
 
 # 周期任务只补启动缺失的 watchdog；正常运行时不创建额外进程。
