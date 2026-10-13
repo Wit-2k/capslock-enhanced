@@ -29,7 +29,7 @@ Not implemented:
 
 Publish with `dotnet publish -c Release` from this directory, then run `remake.exe` from the publish output. Its manifest requests administrator rights; launching it directly can show UAC.
 
-Keep the published files together: `remake.exe` reads `capslock+icon.ico` from its own directory for the tray icon, and `ensure-autostart.ps1` looks for `remake.exe` next to itself.
+The tray icon is embedded in `remake.exe`, so you can copy and rename the executable for manual use without `capslock+icon.ico`. The auto-start scripts are separate: keep them beside an executable named `remake.exe`, since they locate that exact filename.
 
 Prebuilt binaries are attached to [Releases](https://github.com/Wit-2k/capslock-enhanced/releases).
 

@@ -19,7 +19,6 @@
     </PackageReference>
     <None Update="install-autostart.ps1" CopyToPublishDirectory="Always" />
     <None Update="ensure-autostart.ps1" CopyToPublishDirectory="Always" />
-    <None Update="capslock+icon.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />
   </ItemGroup>
 
 </Project>

@@ -12,6 +12,8 @@ internal sealed unsafe class NativeWindow : IDisposable
 {
     private const string WindowClassName = "CapsLockPlusRemakeWorkerWindow";
     private const string WindowTitle = "CapsLock+ mini";
+    // ApplicationIcon 编译为资源 ID 32512，托盘直接从 EXE 加载图标。
+    private const int EmbeddedIconResourceId = 32512;
     private const uint TrayCallbackMessage = 0x8001;
     private const uint ExitCommand = 1;
     private const uint WmClose = 0x0010;
@@ -115,22 +117,14 @@ internal sealed unsafe class NativeWindow : IDisposable
 
     private void AddTrayIcon()
     {
-        string iconPath = Path.Combine(AppContext.BaseDirectory, "capslock+icon.ico");
-        if (!File.Exists(iconPath))
-            throw new FileNotFoundException("发布目录缺少项目托盘图标。", iconPath);
-
-        HANDLE loadedIcon;
-        fixed (char* iconPathPointer = iconPath)
-        {
-            // 文件加载的 HICON 由当前 worker 所有；托盘销毁后必须显式释放。
-            loadedIcon = PInvoke.LoadImage(
-                default,
-                new PCWSTR(iconPathPointer),
-                GDI_IMAGE_TYPE.IMAGE_ICON,
-                0,
-                0,
-                IMAGE_FLAGS.LR_LOADFROMFILE | IMAGE_FLAGS.LR_DEFAULTSIZE);
-        }
+        // 从当前 EXE 的图标资源加载，复制或改名后不依赖旁边的 ICO 文件。
+        HANDLE loadedIcon = PInvoke.LoadImage(
+            _instance,
+            new PCWSTR((char*)EmbeddedIconResourceId),
+            GDI_IMAGE_TYPE.IMAGE_ICON,
+            0,
+            0,
+            IMAGE_FLAGS.LR_DEFAULTSIZE);
         if (loadedIcon.Value is null)
             throw new Win32Exception(Marshal.GetLastWin32Error(), "加载项目托盘图标失败。");
 
